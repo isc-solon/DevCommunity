@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<Export generator="Cache" version="25">
+<Class name="Demo.MonitorErrors">
+<Description>
+Demo Application Errors Monitor</Description>
+<Super>%Monitor.Adaptor</Super>
+<TimeCreated>64279,61020.756175</TimeCreated>
+
+<Parameter name="LOG">
+<Description>
+set this parameter to 1 to turn on logging in ^demolog global</Description>
+<Default>0</Default>
+</Parameter>
+
+<UDLText name="T">
+<Content><![CDATA[
+/*
+   *** these are internal "helper" properties for the object
+   *** they remain in memory while this class is activated and running
+*/
+]]></Content>
+</UDLText>
+
+<Property name="Query">
+<Description>
+Used for BOTH queries on the Application Error Log</Description>
+<Type>%ResultSet</Type>
+<Internal>1</Internal>
+</Property>
+
+<Property name="FilteredRows">
+<Description>
+Holds the *filtered* rows returned by the query, suscripted by the SerialNumber:Currency key</Description>
+<Type>%String</Type>
+<Internal>1</Internal>
+<MultiDimensional>1</MultiDimensional>
+</Property>
+
+<Property name="Key">
+<Description>
+Subscript (Name:Phone) of the FilteredRows, for looping</Description>
+<Type>%String</Type>
+<Internal>1</Internal>
+</Property>
+
+<Property name="TodaysCount">
+<Description>
+Total Errors for today</Description>
+<Type>%Integer</Type>
+<Internal>1</Internal>
+</Property>
+
+<UDLText name="T">
+<Content><![CDATA[
+/*
+   *** the parameter and these 5 properties define a sample
+   *** the sample properties are STORED in the generated class <package>.Sample.<class>
+   *** any alerts are based on the stored sample data
+*/
+]]></Content>
+</UDLText>
+
+<Parameter name="INDEX">
+<Description>
+The key for the sample data is the combination of Name and Phone</Description>
+<Default>Name,Phone</Default>
+</Parameter>
+
+<Property name="Name">
+<Description>
+Employee name</Description>
+<Type>%Monitor.String</Type>
+</Property>
+
+<Property name="Phone">
+<Description>
+Employee Phone</Description>
+<Type>%Monitor.String</Type>
+</Property>
+
+<Property name="ErrorCount">
+<Description>
+count of errors for an employee</Description>
+<Type>%Monitor.String</Type>
+<Parameter name="CAPTION" value="Error Count"/>
+</Property>
+
+<Property name="Earliest">
+<Description>
+earliest time of error for an employee</Description>
+<Type>%Monitor.String</Type>
+<Parameter name="CAPTION" value="Earliest Occurrence"/>
+</Property>
+
+<Property name="Latest">
+<Description>
+latest time of error for an employee</Description>
+<Type>%Monitor.String</Type>
+<Parameter name="CAPTION" value="Latest Occurrence"/>
+</Property>
+
+<Method name="Initialize">
+<Description>
+Run the queries for Application Errors for today</Description>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	try {
+		kill:(..#LOG = 0) ^demolog
+		
+	    set today = $zdate(+$h)
+	    
+	    // run this simple query first (returns one row) to see if there are ANY errors in %SYS namespace today
+	    set ..Query = ##class(%Library.ResultSet).%New("SYS.ApplicationError:DateList")
+	    do ..Query.%Execute("%SYS")
+	    set latestErrorCount = 0
+	    if (..Query.%Next() = 1) && (..Query.Date = today) {
+	    		// get current error count for today
+		    set latestErrorCount = ..Query.Qty
+	    }
+	    do ..Query.Close()
+	    
+	    // if there are more errors since last time, update ..TodaysCount and continue.
+	    // Otherwise, wait until next sample run
+	    if (latestErrorCount > ..TodaysCount) {
+			set:(..#LOG = 1) ^demolog($i(^demolog)) = "collect sample (" _ $ztime($piece($h, ",", 2)) _ ")"
+			set ..TodaysCount = latestErrorCount
+	    }
+	    else {
+		    set:(..#LOG = 1) ^demolog($i(^demolog)) = "don't sample   (" _ $ztime($piece($h, ",", 2)) _ ")"
+		    return 0  /// this ends Initialize() AND prevents any call(s) to GetSample()
+	    }
+
+		
+	    // get the list of errors for this namespace today
+	    set ..Query = ##class(%Library.ResultSet).%New("SYS.ApplicationError:ErrorList")
+	    do ..Query.%Execute("%SYS", today)
+
+	    // query returns errors from most recent to oldest
+	    // Demo.TestErrorMonitor creates #5001 errors like this:
+	    //    ERROR #5001: Problem with Employee: John Smith (111-222-3333)
+	    // ...so find only the #5001 errors and put info about them into ..FilteredRows
+	    
+	    // at the beginning of each sample run, destroy the sample data
+	    kill ..FilteredRows
+	    while (..Query.%Next() '= 0) {
+		    set errorMessage= ..Query.Get("Error message")
+		    if (errorMessage '[ "#5001") { continue }
+		    // the Employee name is between "Employee: " and " ("
+		    set name = $piece($piece(errorMessage, "Employee: ", 2), " (")
+		    // the Employee phone is between "(" and ")"
+		    set phone = $piece($piece(errorMessage, "(", 2), ")")
+		    set time = $zth(..Query.Get("Time"))
+		    
+		    // access/create/update this entry
+		    set key = name _ ":" _ phone
+		    set entry = $get(..FilteredRows(key))
+		    if (entry = "") {
+			    // data for first entry
+			    set count = 1, (earliest, latest) = time
+		    }
+		    else {
+			    // update data for this entry 
+			    	set earliest = $list(entry, 2)
+			    	set latest = $list(entry, 3)
+			    	if (time < earliest) {
+				    	set earliest = time
+				}
+			    	elseif (time > latest) {
+				    	set latest = time
+				}
+				set count = $list(entry, 1) + 1 // increment count
+		    }
+		    set ..FilteredRows(key) = $listbuild(count, earliest, latest)
+	    }
+	    // finished looping through results, so initialize for looping through ..FilteredRows in GetSample()
+	    set ..Key = "" 
+
+	}
+	catch ex {
+		#dim ex as %Exception.SystemException
+		do ex.Log()
+	}
+		
+	do ..Query.Close()
+    return $$$OK
+]]></Implementation>
+</Method>
+
+<Method name="GetSample">
+<Description><![CDATA[
+this is called repeatedly until it returns 0<br>
+return $$$OK means store this row of sample data (and GetSample() is called again)]]></Description>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	set:(..#LOG = 1) ^demolog($i(^demolog)) = "store sample   (" _ $ztime($piece($h, ",", 2)) _ ")"
+	set ..Key = $order(..FilteredRows(..Key), 1, entry)
+	if (..Key = "") { return 0 }
+	set ..Name = $piece(..Key, ":", 1)
+	set ..Phone = $piece(..Key, ":", 2)
+	set ..ErrorCount = $list(entry, 1)
+	set ..Earliest = $ztime($list(entry, 2))
+	set ..Latest = $ztime($list(entry, 3))
+    return $$$OK
+]]></Implementation>
+</Method>
+
+<UDLText name="T">
+<Content><![CDATA[
+/*
+   *** these are additional methods (NOT used by the example)
+*/
+]]></Content>
+</UDLText>
+
+<Method name="Startup">
+<Description>
+This method is called once when the control object is created when Application Monitor starts.
+Use it to initialize the control class.</Description>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[	Quit $$$OK
+]]></Implementation>
+</Method>
+
+<Method name="Shutdown">
+<Description>
+This method is called once when the control object is destroyed when Application Monitor stops.
+Use it to cleanup the control class.</Description>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[	Quit $$$OK
+]]></Implementation>
+</Method>
+</Class>
+
+<Class name="Demo.TestErrorMonitor">
+<Description>
+Generate custom errors</Description>
+<TimeCreated>64279,61020.786038</TimeCreated>
+
+<Method name="CreateOneError">
+<Description>
+create an exception and log it</Description>
+<ClassMethod>1</ClassMethod>
+<FormalSpec>name:%String="",phone:%String=""</FormalSpec>
+<Implementation><![CDATA[
+	// if name or phone wasn't passed in, use Population utilities to generate a random name and phone number
+	if (name = "") { set name = ##class(%PopulateUtils).Name() }
+	if (phone = "") { set phone = ##class(%PopulateUtils).USPhone() }	
+	
+	// change name to "first last"
+	set name = $piece($piece(name, ",", 2), " ") _ " " _ $piece(name, ",", 1)
+	set ex = ##class(%Exception.StatusException).%New()
+	set ex.Code = 5001
+	set msg = "Problem with Employee: " _ name _ " (" _ phone _ ")"
+	write !, msg
+	// the Data property must be a list
+	set ex.Data = $lb(msg)
+	// log the exception
+	do ex.Log()
+]]></Implementation>
+</Method>
+
+<Method name="CreateErrors">
+<Description>
+create multiple exceptions for the same person</Description>
+<ClassMethod>1</ClassMethod>
+<FormalSpec>count:%Integer=5</FormalSpec>
+<Implementation><![CDATA[
+	set name = ##class(%PopulateUtils).Name()
+	set phone = ##class(%PopulateUtils).USPhone()
+	for i=1:1:count {
+		do ..CreateOneError(name, phone)
+		// 25% of the time hang for 1 second, so that there is a difference between earliest/latest occurrence
+		// this simulates the same error happening at different times, which the Alert tests for
+		hang:($random(4) = 0) 1
+	}
+]]></Implementation>
+</Method>
+</Class>
+</Export>
